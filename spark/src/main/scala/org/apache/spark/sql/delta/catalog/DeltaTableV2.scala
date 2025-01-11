@@ -16,6 +16,10 @@
 
 package org.apache.spark.sql.delta.catalog
 
+import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.expressions.{Cast, GenericInternalRow, Literal}
+import org.apache.spark.sql.connector.catalog.SupportsPartitionManagement
+
 import java.{util => ju}
 
 // scalastyle:off import.ordering.noEmptyLine
@@ -64,6 +68,7 @@ case class DeltaTableV2(
     options: Map[String, String] = Map.empty)
   extends Table
   with SupportsWrite
+  with SupportsPartitionManagement
   with V2TableWithV1Fallback
   with DeltaLogging {
 
@@ -335,6 +340,55 @@ case class DeltaTableV2(
 
   override def v1Table: CatalogTable = ttSafeCatalogTable.getOrElse {
     throw DeltaErrors.invalidV1TableCall("v1Table", "DeltaTableV2")
+  }
+
+  override def partitionSchema(): StructType = {
+    initialSnapshot.metadata.partitionSchema
+  }
+
+  override def createPartition(ident: InternalRow, properties: ju.Map[String, String]): Unit = {
+    throw new UnsupportedOperationException("Delta doesn't support manually adding partitions")
+  }
+
+  override def dropPartition(ident: InternalRow): Boolean = {
+    throw new UnsupportedOperationException("Delta doesn't support manually dropping partitions")
+  }
+
+  override def replacePartitionMetadata(ident: InternalRow,
+                                        properties: ju.Map[String, String]): Unit = {
+    throw new UnsupportedOperationException("Delta doesn't support partition metadata")
+  }
+
+  override def loadPartitionMetadata(ident: InternalRow): ju.Map[String, String] = {
+    throw new UnsupportedOperationException("Delta doesn't support partition metadata")
+  }
+
+  override def listPartitionIdentifiers(names: Array[String],
+                                        ident: InternalRow): Array[InternalRow] = {
+    // scalastyle:off sparkimplicits
+    import spark.implicits._
+    // scalastyle:on sparkimplicits
+
+    val partitionColumns = initialSnapshot.metadata.partitionColumns
+    val identMap = names.zipWithIndex.map { case (name, i) =>
+      name -> ident.get(i, partitionSchema.fields(i).dataType).toString
+    }
+
+    val filteredFiles = initialSnapshot.allFiles.filter { addFile =>
+      identMap.forall { case (name, value) => addFile.partitionValues(name) == value }
+    }
+
+    val uniqueParitions = filteredFiles.map { addFile =>
+      partitionColumns.map(colName => addFile.partitionValues(colName))
+    }.distinct()
+
+    uniqueParitions.collect.map { partitions =>
+      val row = new GenericInternalRow(partitions.length)
+      partitionSchema.fields.zipWithIndex.foreach { case (structField, i) =>
+        row.values(i) = Cast(Literal(partitions(i)), structField.dataType).eval()
+      }
+      row
+    }
   }
 }
 
